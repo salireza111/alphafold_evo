@@ -1802,11 +1802,15 @@ class EvoformerIteration(hk.Module):
         self.global_config = global_config
         self.is_extra_msa = is_extra_msa
 
-    @jax.jit
     def print_distance(self, pair_act, res1_idx, res2_idx, layer_name):
-        distance = jnp.linalg.norm(pair_act[res1_idx, res2_idx])
-        print(f"Distance between residue {res1_idx + 1} and {res2_idx + 1} at {layer_name}: {distance:.4f}")
+        """Prints the distance between two residues."""
+        # Use a JAX-compatible function to compute the distance and ensure it's done after computation.
+        def compute_distance():
+            return jnp.linalg.norm(pair_act[res1_idx, res2_idx])
 
+        # Print only after the distance is fully computed
+        distance = compute_distance()  # No need to use block_until_ready explicitly
+        print(f"Distance between residue {res1_idx + 1} and {res2_idx + 1} at {layer_name}: {distance}")
 
     def __call__(self, activations, masks, is_training=True, safe_key=None):
         """Builds EvoformerIteration module."""
@@ -1938,6 +1942,7 @@ class EvoformerIteration(hk.Module):
         self.print_distance(pair_act, res1_idx, res2_idx, "pair_transition")
 
         return {'msa': msa_act, 'pair': pair_act}
+
 
 
 class EmbeddingsAndEvoformer(hk.Module):
