@@ -1807,10 +1807,11 @@ class EvoformerIteration(hk.Module):
         # Compute the Euclidean distance between the two residues.
         distance = jnp.linalg.norm(pair_act[res1_idx, res2_idx])
         
-        # Convert JAX array to numpy and ensure computation is finished
-        distance = jax.device_get(distance).block_until_ready()
+        # Convert the JAX array to a numpy array to force the computation
+        distance = np.array(distance)
         
         print(f"Distance between residue {res1_idx + 1} (E) and {res2_idx + 1} (H) at {layer_name}: {distance:.4f}")
+
 
     def __call__(self, activations, masks, is_training=True, safe_key=None):
         """Builds EvoformerIteration module."""
