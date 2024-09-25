@@ -1802,15 +1802,10 @@ class EvoformerIteration(hk.Module):
         self.global_config = global_config
         self.is_extra_msa = is_extra_msa
 
+    @jax.jit
     def print_distance(self, pair_act, res1_idx, res2_idx, layer_name):
-        """Prints the distance between two residues."""
-        # Compute the Euclidean distance between the two residues.
         distance = jnp.linalg.norm(pair_act[res1_idx, res2_idx])
-        
-        # Convert the JAX array to a numpy array to force the computation
-        distance = np.array(distance)
-        
-        print(f"Distance between residue {res1_idx + 1} (E) and {res2_idx + 1} (H) at {layer_name}: {distance:.4f}")
+        print(f"Distance between residue {res1_idx + 1} and {res2_idx + 1} at {layer_name}: {distance:.4f}")
 
 
     def __call__(self, activations, masks, is_training=True, safe_key=None):
