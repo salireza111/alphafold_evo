@@ -1645,134 +1645,299 @@ def pseudo_beta_fn(aatype, all_atom_positions, all_atom_masks):
     return pseudo_beta
 
 
+'''
 class EvoformerIteration(hk.Module):
-  """Single iteration (block) of Evoformer stack.
+    """Single iteration (block) of Evoformer stack."""
 
-  Jumper et al. (2021) Suppl. Alg. 6 "EvoformerStack" lines 2-10
-  """
+    def __init__(self, config, global_config, is_extra_msa, name='evoformer_iteration'):
+        super().__init__(name=name)
+        self.config = config
+        self.global_config = global_config
+        self.is_extra_msa = is_extra_msa
 
-  def __init__(self, config, global_config, is_extra_msa,
-               name='evoformer_iteration'):
-    super().__init__(name=name)
-    self.config = config
-    self.global_config = global_config
-    self.is_extra_msa = is_extra_msa
+    def print_distance(self, pair_act, res1_idx, res2_idx, layer_name):
+        """Prints the distance between two residues."""
+        # Compute the Euclidean distance between the two residues.
+        distance = jnp.linalg.norm(pair_act[res1_idx, res2_idx])
+        print(f"Distance between residue {res1_idx + 1} (E) and {res2_idx + 1} (H) at {layer_name}: {distance}")
 
-  def __call__(self, activations, masks, is_training=True, safe_key=None):
-    """Builds EvoformerIteration module.
+    def __call__(self, activations, masks, is_training=True, safe_key=None):
+        """Builds EvoformerIteration module."""
+        c = self.config
+        gc = self.global_config
 
-    Arguments:
-      activations: Dictionary containing activations:
-        * 'msa': MSA activations, shape [N_seq, N_res, c_m].
-        * 'pair': pair activations, shape [N_res, N_res, c_z].
-      masks: Dictionary of masks:
-        * 'msa': MSA mask, shape [N_seq, N_res].
-        * 'pair': pair mask, shape [N_res, N_res].
-      is_training: Whether the module is in training mode.
-      safe_key: prng.SafeKey encapsulating rng key.
+        # Get MSA and pair activations
+        msa_act, pair_act = activations['msa'], activations['pair']
 
-    Returns:
-      Outputs, same shape/type as act.
-    """
-    c = self.config
-    gc = self.global_config
+        if safe_key is None:
+            safe_key = prng.SafeKey(hk.next_rng_key())
 
-    msa_act, pair_act = activations['msa'], activations['pair']
+        msa_mask, pair_mask = masks['msa'], masks['pair']
 
-    if safe_key is None:
-      safe_key = prng.SafeKey(hk.next_rng_key())
+        dropout_wrapper_fn = functools.partial(
+            dropout_wrapper,
+            is_training=is_training,
+            global_config=gc)
 
-    msa_mask, pair_mask = masks['msa'], masks['pair']
+        safe_key, *sub_keys = safe_key.split(10)
+        sub_keys = iter(sub_keys)
 
-    dropout_wrapper_fn = functools.partial(
-        dropout_wrapper,
-        is_training=is_training,
-        global_config=gc)
+        # Define the indices for residues 1 (E) and 4 (H) - assuming 0-based indexing
+        res1_idx = 0  # E at position 1 (0-based index)
+        res2_idx = 3  # H at position 4 (0-based index)
 
-    safe_key, *sub_keys = safe_key.split(10)
-    sub_keys = iter(sub_keys)
+        # Initial distance before any transformations
+        self.print_distance(pair_act, res1_idx, res2_idx, "initial")
 
-    outer_module = OuterProductMean(
-        config=c.outer_product_mean,
-        global_config=self.global_config,
-        num_output_channel=int(pair_act.shape[-1]),
-        name='outer_product_mean')
-    if c.outer_product_mean.first:
-      pair_act = dropout_wrapper_fn(
-          outer_module,
-          msa_act,
-          msa_mask,
-          safe_key=next(sub_keys),
-          output_act=pair_act)
+        # Outer Product Mean step
+        outer_module = OuterProductMean(
+            config=c.outer_product_mean,
+            global_config=self.global_config,
+            num_output_channel=int(pair_act.shape[-1]),
+            name='outer_product_mean')
+        if c.outer_product_mean.first:
+            pair_act = dropout_wrapper_fn(
+                outer_module,
+                msa_act,
+                msa_mask,
+                safe_key=next(sub_keys),
+                output_act=pair_act)
+            self.print_distance(pair_act, res1_idx, res2_idx, "outer_product_mean")
 
-    msa_act = dropout_wrapper_fn(
-        MSARowAttentionWithPairBias(
-            c.msa_row_attention_with_pair_bias, gc,
-            name='msa_row_attention_with_pair_bias'),
-        msa_act,
-        msa_mask,
-        safe_key=next(sub_keys),
-        pair_act=pair_act)
+        # MSA Row Attention with Pair Bias
+        msa_act = dropout_wrapper_fn(
+            MSARowAttentionWithPairBias(
+                c.msa_row_attention_with_pair_bias, gc,
+                name='msa_row_attention_with_pair_bias'),
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys),
+            pair_act=pair_act)
+        self.print_distance(pair_act, res1_idx, res2_idx, "msa_row_attention_with_pair_bias")
 
-    if not self.is_extra_msa:
-      attn_mod = MSAColumnAttention(
-          c.msa_column_attention, gc, name='msa_column_attention')
-    else:
-      attn_mod = MSAColumnGlobalAttention(
-          c.msa_column_attention, gc, name='msa_column_global_attention')
-    msa_act = dropout_wrapper_fn(
-        attn_mod,
-        msa_act,
-        msa_mask,
-        safe_key=next(sub_keys))
+        # MSA Column Attention or MSA Column Global Attention
+        if not self.is_extra_msa:
+            attn_mod = MSAColumnAttention(
+                c.msa_column_attention, gc, name='msa_column_attention')
+        else:
+            attn_mod = MSAColumnGlobalAttention(
+                c.msa_column_attention, gc, name='msa_column_global_attention')
+        msa_act = dropout_wrapper_fn(
+            attn_mod,
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "msa_column_attention")
 
-    msa_act = dropout_wrapper_fn(
-        Transition(c.msa_transition, gc, name='msa_transition'),
-        msa_act,
-        msa_mask,
-        safe_key=next(sub_keys))
+        # MSA Transition
+        msa_act = dropout_wrapper_fn(
+            Transition(c.msa_transition, gc, name='msa_transition'),
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys))
 
-    if not c.outer_product_mean.first:
-      pair_act = dropout_wrapper_fn(
-          outer_module,
-          msa_act,
-          msa_mask,
-          safe_key=next(sub_keys),
-          output_act=pair_act)
+        # Second Outer Product Mean (if applicable)
+        if not c.outer_product_mean.first:
+            pair_act = dropout_wrapper_fn(
+                outer_module,
+                msa_act,
+                msa_mask,
+                safe_key=next(sub_keys),
+                output_act=pair_act)
+            self.print_distance(pair_act, res1_idx, res2_idx, "second_outer_product_mean")
 
-    pair_act = dropout_wrapper_fn(
-        TriangleMultiplication(c.triangle_multiplication_outgoing, gc,
-                               name='triangle_multiplication_outgoing'),
-        pair_act,
-        pair_mask,
-        safe_key=next(sub_keys))
-    pair_act = dropout_wrapper_fn(
-        TriangleMultiplication(c.triangle_multiplication_incoming, gc,
-                               name='triangle_multiplication_incoming'),
-        pair_act,
-        pair_mask,
-        safe_key=next(sub_keys))
+        # Triangle Multiplication Outgoing
+        pair_act = dropout_wrapper_fn(
+            TriangleMultiplication(c.triangle_multiplication_outgoing, gc,
+                                   name='triangle_multiplication_outgoing'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_outgoing")
 
-    pair_act = dropout_wrapper_fn(
-        TriangleAttention(c.triangle_attention_starting_node, gc,
-                          name='triangle_attention_starting_node'),
-        pair_act,
-        pair_mask,
-        safe_key=next(sub_keys))
-    pair_act = dropout_wrapper_fn(
-        TriangleAttention(c.triangle_attention_ending_node, gc,
-                          name='triangle_attention_ending_node'),
-        pair_act,
-        pair_mask,
-        safe_key=next(sub_keys))
+        # Triangle Multiplication Incoming
+        pair_act = dropout_wrapper_fn(
+            TriangleMultiplication(c.triangle_multiplication_incoming, gc,
+                                   name='triangle_multiplication_incoming'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_incoming")
 
-    pair_act = dropout_wrapper_fn(
-        Transition(c.pair_transition, gc, name='pair_transition'),
-        pair_act,
-        pair_mask,
-        safe_key=next(sub_keys))
+        # Triangle Attention Starting Node
+        pair_act = dropout_wrapper_fn(
+            TriangleAttention(c.triangle_attention_starting_node, gc,
+                              name='triangle_attention_starting_node'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_starting_node")
 
-    return {'msa': msa_act, 'pair': pair_act}
+        # Triangle Attention Ending Node
+        pair_act = dropout_wrapper_fn(
+            TriangleAttention(c.triangle_attention_ending_node, gc,
+                              name='triangle_attention_ending_node'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_ending_node")
+
+        # Pair Transition
+        pair_act = dropout_wrapper_fn(
+            Transition(c.pair_transition, gc, name='pair_transition'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "pair_transition")
+
+        return {'msa': msa_act, 'pair': pair_act}
+
+'''
+class EvoformerIteration(hk.Module):
+    """Single iteration (block) of Evoformer stack."""
+
+    def __init__(self, config, global_config, is_extra_msa, name='evoformer_iteration'):
+        super().__init__(name=name)
+        self.config = config
+        self.global_config = global_config
+        self.is_extra_msa = is_extra_msa
+
+    def print_distance(self, pair_act, res1_idx, res2_idx, layer_name):
+        """Prints the distance between two residues."""
+        # Compute the Euclidean distance between the two residues.
+        distance = jnp.linalg.norm(pair_act[res1_idx, res2_idx])
+        print(f"Distance between residue {res1_idx + 1} (E) and {res2_idx + 1} (H) at {layer_name}: {distance}")
+
+    def __call__(self, activations, masks, is_training=True, safe_key=None):
+        """Builds EvoformerIteration module."""
+        c = self.config
+        gc = self.global_config
+
+        # Get MSA and pair activations
+        msa_act, pair_act = activations['msa'], activations['pair']
+
+        if safe_key is None:
+            safe_key = prng.SafeKey(hk.next_rng_key())
+
+        msa_mask, pair_mask = masks['msa'], masks['pair']
+
+        dropout_wrapper_fn = functools.partial(
+            dropout_wrapper,
+            is_training=is_training,
+            global_config=gc)
+
+        safe_key, *sub_keys = safe_key.split(10)
+        sub_keys = iter(sub_keys)
+
+        # Define the indices for residues 1 (E) and 4 (H) - assuming 0-based indexing
+        res1_idx = 0  # E at position 1 (0-based index)
+        res2_idx = 3  # H at position 4 (0-based index)
+
+        # Initial distance before any transformations
+        self.print_distance(pair_act, res1_idx, res2_idx, "initial")
+
+        # Outer Product Mean step
+        outer_module = OuterProductMean(
+            config=c.outer_product_mean,
+            global_config=self.global_config,
+            num_output_channel=int(pair_act.shape[-1]),
+            name='outer_product_mean')
+        if c.outer_product_mean.first:
+            pair_act = dropout_wrapper_fn(
+                outer_module,
+                msa_act,
+                msa_mask,
+                safe_key=next(sub_keys),
+                output_act=pair_act)
+            self.print_distance(pair_act, res1_idx, res2_idx, "outer_product_mean")
+
+        # MSA Row Attention with Pair Bias
+        msa_act = dropout_wrapper_fn(
+            MSARowAttentionWithPairBias(
+                c.msa_row_attention_with_pair_bias, gc,
+                name='msa_row_attention_with_pair_bias'),
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys),
+            pair_act=pair_act)
+        self.print_distance(pair_act, res1_idx, res2_idx, "msa_row_attention_with_pair_bias")
+
+        # MSA Column Attention or MSA Column Global Attention
+        if not self.is_extra_msa:
+            attn_mod = MSAColumnAttention(
+                c.msa_column_attention, gc, name='msa_column_attention')
+        else:
+            attn_mod = MSAColumnGlobalAttention(
+                c.msa_column_attention, gc, name='msa_column_global_attention')
+        msa_act = dropout_wrapper_fn(
+            attn_mod,
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "msa_column_attention")
+
+        # MSA Transition
+        msa_act = dropout_wrapper_fn(
+            Transition(c.msa_transition, gc, name='msa_transition'),
+            msa_act,
+            msa_mask,
+            safe_key=next(sub_keys))
+
+        # Second Outer Product Mean (if applicable)
+        if not c.outer_product_mean.first:
+            pair_act = dropout_wrapper_fn(
+                outer_module,
+                msa_act,
+                msa_mask,
+                safe_key=next(sub_keys),
+                output_act=pair_act)
+            self.print_distance(pair_act, res1_idx, res2_idx, "second_outer_product_mean")
+
+        # Triangle Multiplication Outgoing
+        pair_act = dropout_wrapper_fn(
+            TriangleMultiplication(c.triangle_multiplication_outgoing, gc,
+                                   name='triangle_multiplication_outgoing'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_outgoing")
+
+        # Triangle Multiplication Incoming
+        pair_act = dropout_wrapper_fn(
+            TriangleMultiplication(c.triangle_multiplication_incoming, gc,
+                                   name='triangle_multiplication_incoming'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_incoming")
+
+        # Triangle Attention Starting Node
+        pair_act = dropout_wrapper_fn(
+            TriangleAttention(c.triangle_attention_starting_node, gc,
+                              name='triangle_attention_starting_node'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_starting_node")
+
+        # Triangle Attention Ending Node
+        pair_act = dropout_wrapper_fn(
+            TriangleAttention(c.triangle_attention_ending_node, gc,
+                              name='triangle_attention_ending_node'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_ending_node")
+
+        # Pair Transition
+        pair_act = dropout_wrapper_fn(
+            Transition(c.pair_transition, gc, name='pair_transition'),
+            pair_act,
+            pair_mask,
+            safe_key=next(sub_keys))
+        self.print_distance(pair_act, res1_idx, res2_idx, "pair_transition")
+
+        return {'msa': msa_act, 'pair': pair_act}
 
 
 class EmbeddingsAndEvoformer(hk.Module):
