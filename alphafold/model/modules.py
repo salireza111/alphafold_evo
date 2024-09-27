@@ -1808,8 +1808,8 @@ class EvoformerIteration(hk.Module):
         def compute_distance():
             return jnp.linalg.norm(pair_act[res1_idx, res2_idx])
 
-        # Print only after the distance is fully computed
-        distance = compute_distance()  # No need to use block_until_ready explicitly
+        # Ensure the distance is fully computed before printing
+        distance = compute_distance().block_until_ready()  # This forces the computation to complete
         print(f"Distance between residue {res1_idx + 1} and {res2_idx + 1} at {layer_name}: {distance}")
 
     def __call__(self, activations, masks, is_training=True, safe_key=None):
