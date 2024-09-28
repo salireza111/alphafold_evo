@@ -1793,6 +1793,24 @@ class EvoformerIteration(hk.Module):
         return {'msa': msa_act, 'pair': pair_act}
 
 '''
+import functools
+import haiku as hk
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax import random as prng
+
+# Import or define all the necessary modules used in the class
+# You need to ensure that the following modules are properly defined or imported:
+# - dropout_wrapper
+# - OuterProductMean
+# - MSARowAttentionWithPairBias
+# - MSAColumnAttention
+# - MSAColumnGlobalAttention
+# - Transition
+# - TriangleMultiplication
+# - TriangleAttention
+
 class EvoformerIteration(hk.Module):
     """Single iteration (block) of Evoformer stack."""
 
@@ -1802,18 +1820,8 @@ class EvoformerIteration(hk.Module):
         self.global_config = global_config
         self.is_extra_msa = is_extra_msa
 
-    def print_distance(self, pair_act, res1_idx, res2_idx, layer_name):
-        """Prints the distance between two residues."""
-        # Use a JAX-compatible function to compute the distance and ensure it's done after computation.
-        def compute_distance():
-            return jnp.linalg.norm(pair_act[res1_idx, res2_idx])
-
-        # Ensure the distance is fully computed before printing
-        distance = compute_distance().block_until_ready()  # This forces the computation to complete
-        print(f"Distance between residue {res1_idx + 1} and {res2_idx + 1} at {layer_name}: {distance}")
-
     def __call__(self, activations, masks, is_training=True, safe_key=None):
-        """Builds EvoformerIteration module."""
+        """Builds EvoformerIteration module and collects distances."""
         c = self.config
         gc = self.global_config
 
@@ -1833,12 +1841,20 @@ class EvoformerIteration(hk.Module):
         safe_key, *sub_keys = safe_key.split(10)
         sub_keys = iter(sub_keys)
 
-        # Define the indices for residues 1 (E) and 4 (H) - assuming 0-based indexing
-        res1_idx = 0  # E at position 1 (0-based index)
-        res2_idx = 3  # H at position 4 (0-based index)
+        # Define the indices for residues - assuming 0-based indexing
+        res1_idx = 0  # Residue at position 1 (0-based index)
+        res2_idx = 3  # Residue at position 4 (0-based index)
+
+        # Function to compute distance between two residues
+        def compute_distance(pair_act):
+            return jnp.linalg.norm(pair_act[res1_idx, res2_idx])
+
+        # Initialize a list to collect distances
+        distances = []
 
         # Initial distance before any transformations
-        self.print_distance(pair_act, res1_idx, res2_idx, "initial")
+        initial_distance = compute_distance(pair_act)
+        distances.append(('initial', initial_distance))
 
         # Outer Product Mean step
         outer_module = OuterProductMean(
@@ -1846,6 +1862,7 @@ class EvoformerIteration(hk.Module):
             global_config=self.global_config,
             num_output_channel=int(pair_act.shape[-1]),
             name='outer_product_mean')
+
         if c.outer_product_mean.first:
             pair_act = dropout_wrapper_fn(
                 outer_module,
@@ -1853,7 +1870,8 @@ class EvoformerIteration(hk.Module):
                 msa_mask,
                 safe_key=next(sub_keys),
                 output_act=pair_act)
-            self.print_distance(pair_act, res1_idx, res2_idx, "outer_product_mean")
+            distance = compute_distance(pair_act)
+            distances.append(('outer_product_mean', distance))
 
         # MSA Row Attention with Pair Bias
         msa_act = dropout_wrapper_fn(
@@ -1864,7 +1882,8 @@ class EvoformerIteration(hk.Module):
             msa_mask,
             safe_key=next(sub_keys),
             pair_act=pair_act)
-        self.print_distance(pair_act, res1_idx, res2_idx, "msa_row_attention_with_pair_bias")
+        distance = compute_distance(pair_act)
+        distances.append(('msa_row_attention_with_pair_bias', distance))
 
         # MSA Column Attention or MSA Column Global Attention
         if not self.is_extra_msa:
@@ -1873,12 +1892,14 @@ class EvoformerIteration(hk.Module):
         else:
             attn_mod = MSAColumnGlobalAttention(
                 c.msa_column_attention, gc, name='msa_column_global_attention')
+
         msa_act = dropout_wrapper_fn(
             attn_mod,
             msa_act,
             msa_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "msa_column_attention")
+        distance = compute_distance(pair_act)
+        distances.append(('msa_column_attention', distance))
 
         # MSA Transition
         msa_act = dropout_wrapper_fn(
@@ -1895,7 +1916,8 @@ class EvoformerIteration(hk.Module):
                 msa_mask,
                 safe_key=next(sub_keys),
                 output_act=pair_act)
-            self.print_distance(pair_act, res1_idx, res2_idx, "second_outer_product_mean")
+            distance = compute_distance(pair_act)
+            distances.append(('second_outer_product_mean', distance))
 
         # Triangle Multiplication Outgoing
         pair_act = dropout_wrapper_fn(
@@ -1904,7 +1926,8 @@ class EvoformerIteration(hk.Module):
             pair_act,
             pair_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_outgoing")
+        distance = compute_distance(pair_act)
+        distances.append(('triangle_multiplication_outgoing', distance))
 
         # Triangle Multiplication Incoming
         pair_act = dropout_wrapper_fn(
@@ -1913,7 +1936,8 @@ class EvoformerIteration(hk.Module):
             pair_act,
             pair_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_multiplication_incoming")
+        distance = compute_distance(pair_act)
+        distances.append(('triangle_multiplication_incoming', distance))
 
         # Triangle Attention Starting Node
         pair_act = dropout_wrapper_fn(
@@ -1922,7 +1946,8 @@ class EvoformerIteration(hk.Module):
             pair_act,
             pair_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_starting_node")
+        distance = compute_distance(pair_act)
+        distances.append(('triangle_attention_starting_node', distance))
 
         # Triangle Attention Ending Node
         pair_act = dropout_wrapper_fn(
@@ -1931,7 +1956,8 @@ class EvoformerIteration(hk.Module):
             pair_act,
             pair_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "triangle_attention_ending_node")
+        distance = compute_distance(pair_act)
+        distances.append(('triangle_attention_ending_node', distance))
 
         # Pair Transition
         pair_act = dropout_wrapper_fn(
@@ -1939,9 +1965,11 @@ class EvoformerIteration(hk.Module):
             pair_act,
             pair_mask,
             safe_key=next(sub_keys))
-        self.print_distance(pair_act, res1_idx, res2_idx, "pair_transition")
+        distance = compute_distance(pair_act)
+        distances.append(('pair_transition', distance))
 
-        return {'msa': msa_act, 'pair': pair_act}
+        return {'msa': msa_act, 'pair': pair_act, 'distances': distances}
+
 
 
 

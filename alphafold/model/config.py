@@ -235,7 +235,7 @@ CONFIG = ml_collections.ConfigDict({
     },
     'model': {
         'embeddings_and_evoformer': {
-            'evoformer_num_block': 48,
+            'evoformer_num_block': 5,
             'evoformer': {
                 'msa_row_attention_with_pair_bias': {
                     'dropout_rate': 0.15,
@@ -464,7 +464,7 @@ CONFIG = ml_collections.ConfigDict({
 CONFIG_MULTIMER = ml_collections.ConfigDict({
     'model': {
         'embeddings_and_evoformer': {
-            'evoformer_num_block': 48,
+            'evoformer_num_block': 5,
             'evoformer': {
                 'msa_column_attention': {
                     'dropout_rate': 0.0,
